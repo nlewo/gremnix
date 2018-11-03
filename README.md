@@ -31,3 +31,9 @@ gremlin> g.root().closure().order().by("narSize", decr).as("n").values("narSize"
 
 There are much more Gremlin steps which are well
 [documented](http://tinkerpop.apache.org/docs/current/reference/#graph-traversal-steps).
+
+## Installation
+
+```
+nix-env -f default.nix -i
+```
