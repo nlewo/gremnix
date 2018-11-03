@@ -1,12 +1,9 @@
 # Gremnix
 
-_Gremnix_ is a tool to interactively browse the references graph of Nix store paths.
-
-**!!! Gremnix uses the `--graphml` option of `nix-store --query` command which is not yet merged:/ !!!**
+_Gremnix_ is a tool to browse the references graph of Nix store paths.
 
 It is based on the console of [Gremlin](http://tinkerpop.apache.org/),
 a powerful graph traversal language.
-
 
 The following Gremlin session shows how to
 - get the roots of the graph
