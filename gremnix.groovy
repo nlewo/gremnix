@@ -45,3 +45,5 @@ g = TinkerGraph.open();
 g.io(graphml()).readGraph(graphFilename);
 g = g.traversal()
 
+printf("gremlin> g\n")
+printf("==>%s\n", g)
