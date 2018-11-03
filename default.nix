@@ -2,7 +2,9 @@ with import (builtins.fetchGit { url = https://github.com/NixOS/nixpkgs-channels
 
 with pkgs;
 
-let gremlin = stdenv.mkDerivation rec {
+let
+
+gremlin = stdenv.mkDerivation rec {
   name = "gremlin-console-${version}";
   version = "3.3.3";
   src = fetchzip {
@@ -20,11 +22,21 @@ let gremlin = stdenv.mkDerivation rec {
   '';
   };
 
+# To get latest graphml patches
+nixUnstable = pkgs.nixUnstable.overrideAttrs (old: {
+  src = fetchFromGitHub {
+    owner = "NixOS";
+    repo = "nix";
+    rev = "d506342aa2b6945899988878b7c58de683cb573a";
+    sha256 = "12z7v1vpr4sv9m7026gxdxazxvcrxhs0i8ifywf6axlngc5lyzzk";
+  };
+});
+
 in writeShellScriptBin "gremnix" ''
    set -e
-   GREMNIX_NIX_STORE=''${GREMNIX_NIX_STORE:-nix-store}
+   GREMNIX_NIX_STORE=''${GREMNIX_NIX_STORE:-${nixUnstable}/bin/nix-store}
    FILE=$(mktemp --suffix .graphml)
    echo "Executing $GREMNIX_NIX_STORE -q --graphml $@ > $FILE"
-   $$GREMNIX_NIX_STORE -q --graphml $@ > $FILE
+   $GREMNIX_NIX_STORE -q --graphml $@ > $FILE
    ${gremlin}/bin/gremlin-console gremlin-console -i ${./gremnix.groovy} $FILE
 ''
