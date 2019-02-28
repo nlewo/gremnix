@@ -35,5 +35,5 @@ There are much more Gremlin steps which are well
 ## Installation
 
 ```
-nix-env -f default.nix -i
+nix-env -f https://github.com/nlewo/gremnix/archive/master.tar.gz -i
 ```
