@@ -35,9 +35,11 @@ parser = argparse.ArgumentParser(description='Importer')
 parser.add_argument('revision', metavar='REVISION', type=str,
                     help='revision')
 parser.add_argument('--no-prune', action='store_true')
+parser.add_argument('--data-dir', type=str, default="/tmp/gremnix")
+parser.add_argument('--repository-dir', type=str, required=True, help="The directory containing the repository to consider")
 args = parser.parse_args()
 
-data_dir = "/tmp/gremnix/"
+data_dir = args.data_dir
 
 def derivation_from_hydra_jobs(filename):
     with open(filename, "r") as read_file:
@@ -58,16 +60,16 @@ def eval_nixpkgs(revision):
     if os.path.isfile(eval_filepath):
         print("Evaluation file %s already exists" % eval_filepath)
         return
-    p=subprocess.run(["git", "-C", data_dir + "/nixpkgs", "checkout", revision])
+    p=subprocess.run(["git", "-C", args.repository_dir, "checkout", revision])
     if p.returncode != 0:
         print("Running git fetch origin...")
-        subprocess.run(["git", "-C", data_dir + "/nixpkgs", "fetch", "origin"])
-        p=subprocess.run(["git", "-C", data_dir + "/nixpkgs", "checkout", revision])
+        subprocess.run(["git", "-C", args.repository_dir, "fetch", "origin"])
+        p=subprocess.run(["git", "-C", args.repository_dir, "checkout", revision])
     if p.returncode != 0:
         print("Unexepected error when checking out nixpkgs!")
         exit(1)
     print("Running hydra-eval-jobs...")
-    p=subprocess.run(["/nix/store/4wkh88868x4lrv2gwb1602lqk62hdwqx-hydra-eval-nixpkgs-jobs/bin/hydra-eval-nixpkgs-jobs", data_dir + "/nixpkgs"], stdout=subprocess.PIPE)
+    p=subprocess.run(["/nix/store/4wkh88868x4lrv2gwb1602lqk62hdwqx-hydra-eval-nixpkgs-jobs/bin/hydra-eval-nixpkgs-jobs", args.repository_dir], stdout=subprocess.PIPE)
     with open(eval_filepath, "w") as f:
         f.write(p.stdout.decode('utf-8'))
         
