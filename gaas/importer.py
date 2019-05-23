@@ -71,6 +71,9 @@ def eval_nixpkgs(revision):
         exit(1)
     print("Running hydra-eval-jobs...")
     p=subprocess.run([args.hydra_eval_jobs, args.repository_dir], stdout=subprocess.PIPE)
+    if p.returncode != 0:
+        print("Error while running %s %s" % (args.hydra_eval_jobs, args.repository_dir))
+        exit(1)
     with open(eval_filepath, "w") as f:
         f.write(p.stdout.decode('utf-8'))
         
@@ -309,10 +312,11 @@ def load_evaluation(revision):
     
     l = [{"attrName": k, "hash": os.path.basename(v["drvPath"]).split("-")[0]} for k, v in data.items()]
     n = len(l)
-    for i in range(0, n):
-        print("Load job %d/%d - %s\r" % (i, n, l[i]), end="")
-        gremlin.inject(1).\
-            coalesce(__.V().has("commitId", revision).has("attrName", l[i]["attrName"]), __.addV("job").property("commitId", revision).property("attrName", l[i]["attrName"])).as_('j').\
+    step = 100
+    for i in range(0, n, step):
+        print("Load batch of jobs %d-%d/%d\r" % (i, i + step, n), end="")
+        gremlin.inject(l[i:i+step]).unfold().as_("m").\
+            coalesce(__.V().has("commitId", revision).has("attrName", select("m").select("attrName")), __.addV("job").property("commitId", revision).property("attrName", select("m").select("attrName"))).as_('j').\
             V().has("hash", l[i]["hash"]).\
             coalesce(__.inE("instantiation"), __.addE("instantiation").from_("j")).\
             iterate()
