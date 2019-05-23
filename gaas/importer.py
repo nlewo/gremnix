@@ -37,6 +37,7 @@ parser.add_argument('revision', metavar='REVISION', type=str,
 parser.add_argument('--no-prune', action='store_true')
 parser.add_argument('--data-dir', type=str, default="/tmp/gremnix")
 parser.add_argument('--repository-dir', type=str, required=True, help="The directory containing the repository to consider")
+parser.add_argument('--hydra-eval-jobs', type=str, required=True, help="The hydra-eval-job scrip to use")
 args = parser.parse_args()
 
 data_dir = args.data_dir
@@ -69,7 +70,7 @@ def eval_nixpkgs(revision):
         print("Unexepected error when checking out nixpkgs!")
         exit(1)
     print("Running hydra-eval-jobs...")
-    p=subprocess.run(["/nix/store/4wkh88868x4lrv2gwb1602lqk62hdwqx-hydra-eval-nixpkgs-jobs/bin/hydra-eval-nixpkgs-jobs", args.repository_dir], stdout=subprocess.PIPE)
+    p=subprocess.run([args.hydra_eval_jobs, args.repository_dir], stdout=subprocess.PIPE)
     with open(eval_filepath, "w") as f:
         f.write(p.stdout.decode('utf-8'))
         
@@ -91,34 +92,111 @@ def graphml_from_hydra_jobs(revision):
 
     if os.path.isfile(graphml_filepath):
         print("Graphml file %s already exists" % graphml_filepath)
-        return networkx.graphml.read_graphml(graphml_filepath)
+        g = networkx.graphml.read_graphml(graphml_filepath)
+    else:
+        drvs = derivation_from_hydra_jobs(jobs_filepath)
+        print("%s derviation loaded from Hydra jobs file %s" % (len(drvs), jobs_filepath))
 
-    drvs = derivation_from_hydra_jobs(jobs_filepath)
-    print("%s derviation loaded from Hydra jobs file %s" % (len(drvs), jobs_filepath))
+        # FIXME
+        # This is because we cannot provide more than 1000 drvs as Linux command arguments.
+        g = networkx.DiGraph()
+        for i in range(0,len(drvs), 1000):
+            print("Generating partial graphml file (%d:%d)" % (i, len(drvs)))
+            tmp = graphml(drvs[i:i+1000-1])
+            g = networkx.compose(g, tmp)
 
-    # FIXME
-    # This is because we cannot provide more than 1000 drv as Linux command arguments.
-    g = networkx.DiGraph()
-    for i in range(0,len(drvs), 1000):
-        print("Generating partial graphml file (%d:%d)" % (i, len(drvs)))
-        tmp = graphml(drvs[i:i+1000-1])
-        g = networkx.compose(g, tmp)
-    print("Writing graphml file %s" % graphml_filepath)
-    networkx.graphml.write_graphml(g, graphml_filepath)
+        g = enhance_graph(g)
+
+        print("Writing graphml file %s" % graphml_filepath)
+        networkx.graphml.write_graphml(g, graphml_filepath)
     return g
 
+# FIXME: This could/should be supported by nix --graphml output
+# This does 2 things:
+#
+# 1. If a node is a derivation, get all of its outputs. For each
+# outputs, a node is created and the drv is linked to these nodes with
+# an edge of type 'output'.
+#
+# 2. For each node, add the hash, name, pname and version.
+def enhance_graph(graph):
+    print("Enriching nodes of the graph")
+    ln = list([ k for k, v in graph.nodes(data=True) if v["type"] == "derivation"])
+    step = 1000
+    for i in range(0,len(ln), step):
+        print("%d/%d\r" % (i, len(ln)), end="")
+        p=subprocess.run(["nix", "show-derivation"] + ln[i:i+step], stdout=subprocess.PIPE)
+        if p.returncode != 0:
+            print("Unexepected error when nix show-derivation")
+            exit(1)
+        d = json.loads(p.stdout.decode('utf-8'))
+        for n in d:
+            for k, v in d[n]["outputs"].items():
+                graph.add_node(v["path"], type="output-path")
+                graph.add_edge(n, v["path"], type = "output", name = k)
+            
+    for n, v in graph.nodes(data=True):
+        a = os.path.basename(n)
+        b = a.split("-")
+        if v["type"] == "derivation":
+            if len(b) == 2:
+                pname = "-".join(b[-1:])
+                # FIXME find a better way
+                version = "null"
+            else:
+                pname = "-".join(b[1:-1])
+                version = "-".join(b[-1:])
+            attrs = {
+                "hash": b[0],
+                "pname": pname,
+                "version": version
+            }
+        else:
+            name = "-".join(b[1:])
+            attrs = {
+                "hash": b[0],
+                "name": name,
+                # FIXME: We still add them to easily add node but this
+                # should be removed.
+                "pname": "null",
+                "version": "null",
+            }
+            
+        networkx.set_node_attributes(graph, { n: attrs })
+
+    return graph
+                
 def init_janus():
     print("Initialization of Janus database")
     client = Client("ws://localhost:8182/gremlin", 'g')
     create_indexes = """
 graph.tx().rollback()  //Never create new indexes while a transaction is active
 mgmt = graph.openManagement();
-if (!mgmt.getGraphIndex("byPathUnique")) {
-  path = mgmt.makePropertyKey('path').dataType(String.class).cardinality(SINGLE).make(); 
-  mgmt.buildIndex('byPathUnique', Vertex.class).addKey(path).unique().buildCompositeIndex()
+// TODO: improve this
+if (!mgmt.getGraphIndex("byHashUnique")) {
+  hash = mgmt.makePropertyKey('hash').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byHashUnique', Vertex.class).addKey(hash).unique().buildCompositeIndex()
+
+  name = mgmt.makePropertyKey('name').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byName', Vertex.class).addKey(name).buildCompositeIndex()
+
+  pname = mgmt.makePropertyKey('pname').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byPName', Vertex.class).addKey(pname).buildCompositeIndex()
+
+  version = mgmt.makePropertyKey('version').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byVersion', Vertex.class).addKey(version).buildCompositeIndex()
+
+  commitId = mgmt.makePropertyKey('commitId').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byCommitId', Vertex.class).addKey(commitId).buildCompositeIndex()
+
+  attrName = mgmt.makePropertyKey('attrName').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byAttrName', Vertex.class).addKey(attrName).buildCompositeIndex()
 
   mgmt.makeVertexLabel('derivation').make()
-  mgmt.makeEdgeLabel('require').multiplicity(SIMPLE).make()
+  mgmt.makeVertexLabel('job').make()
+  mgmt.makeEdgeLabel('instantiation').multiplicity(SIMPLE).make()
+  mgmt.makeEdgeLabel('reference').multiplicity(SIMPLE).make()
+  mgmt.makeEdgeLabel('output').multiplicity(SIMPLE).make()
 
   mgmt.commit()
 }
@@ -137,7 +215,7 @@ def get_new_nodes(graph, roots):
     gremlin = traversal().withRemote(DriverRemoteConnection('ws://localhost:8182/gremlin','g'))
 
     def already_loaded(n):
-        return gremlin.V().has('path', n).hasNext()
+        return gremlin.V().has('hash', graph.nodes[n]["hash"]).hasNext()
 
     # The goal is to minimize the number of call to gremlin. This
     # checks which nodes are not in the graph. If a node is in the
@@ -165,8 +243,16 @@ def load_graph_into_janus(graph, nodes):
     client = Client("ws://localhost:8182/gremlin", 'g')
     
     def addV(gremlin, nodes, start, total_nodes_added):
-        print("%d nodes already loaded in %f\r" % (total_nodes_added, (time.time() - start)), end = '')
-        gremlin.inject(nodes).unfold().as_('a').addV('derivation').property('path', select('a')).iterate()
+        for n in nodes:
+            if "pname" not in n:
+                print(n)
+        print("%d nodes loaded in %f\r" % (total_nodes_added, (time.time() - start)), end = '')
+        t = gremlin.inject(nodes).unfold().as_('a').addV(select('a').select('type'))
+        t = t.property('hash', select('a').select('hash'))
+        t = t.property('name', select('a').select('name'))
+        t = t.property('pname', select('a').select('pname'))
+        t = t.property('version', select('a').select('version'))
+        t.iterate()
         
     # 500 doens't work: Hit Max frame length of 65536 has been exceeded .
     step = 100
@@ -176,7 +262,7 @@ def load_graph_into_janus(graph, nodes):
     acc = []
     total_nodes_added = 0
     for (i, n) in enumerate(nodes):
-        acc += [n]
+        acc += [graph.nodes[n]]
         total_nodes_added += 1
         if len(acc) == step:
             addV(gremlin, acc, start, total_nodes_added)
@@ -192,7 +278,7 @@ def load_graph_into_janus(graph, nodes):
         # This one crash the janus graph server
         # gremlin.inject(acc).unfold().as_('e').select('src').as_('src').select('e').select('dst').as_('dst').V().has('path', __.where(eq('src'))).as_('src').V().has('path', __.where(eq('dst'))).addE('require').from_('src').iterate()
         client.submit("data.each { " +
-                      "g.inject(1).V().has('path', it.dst).as('d').V().has('path',it.src).coalesce(__.out().has('path', it.dst), __.addE('require').to('d')).iterate()" +
+                      "g.inject(1).V().has('hash', it.dst).as('d').V().has('hash',it.src).coalesce(__.out().has('hash', it.dst), __.addE(it.label).to('d')).iterate()" +
                       "}", {"data" : edges}).all().result()
         
     start = time.time()
@@ -202,7 +288,10 @@ def load_graph_into_janus(graph, nodes):
         for e in graph.edges(n):
             if e[0] != n:
                 continue
-            acc += [{'src':e[0], 'dst': e[1]}]
+            acc += [{
+                'src':graph.nodes[e[0]]["hash"],
+                'dst': graph.nodes[e[1]]["hash"],
+                'label': graph[e[0]][e[1]].get("type", "reference")}]
             total_edges_added += 1
             if len(acc) == step:
                 addE(client, acc, start, i, total_edges_added)
@@ -211,7 +300,23 @@ def load_graph_into_janus(graph, nodes):
         addE(client, acc, start, i, total_edges_added)
     print("\n%d edges loaded in %fs" % (total_edges_added, time.time() - start))
 
+def load_evaluation(revision):
+    print("Connecting to Gremlin")
+    gremlin = traversal().withRemote(DriverRemoteConnection('ws://localhost:8182/gremlin','g'))
+
+    with open(data_dir + "/" + revision + ".json", "r") as read_file:
+        data = json.load(read_file)
     
+    l = [{"attrName": k, "hash": os.path.basename(v["drvPath"]).split("-")[0]} for k, v in data.items()]
+    n = len(l)
+    for i in range(0, n):
+        print("Load job %d/%d - %s\r" % (i, n, l[i]), end="")
+        gremlin.inject(1).\
+            coalesce(__.V().has("commitId", revision).has("attrName", l[i]["attrName"]), __.addV("job").property("commitId", revision).property("attrName", l[i]["attrName"])).as_('j').\
+            V().has("hash", l[i]["hash"]).\
+            coalesce(__.inE("instantiation"), __.addE("instantiation").from_("j")).\
+            iterate()
+    print()
 
 def run():
     revision = args.revision
@@ -234,5 +339,6 @@ def run():
         print("%ds to get new nodes" % int(time.time() - start))
     
     load_graph_into_janus(g, nodes)
+    load_evaluation(revision)
 
 run()
