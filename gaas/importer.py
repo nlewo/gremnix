@@ -37,6 +37,7 @@ parser.add_argument('revision', metavar='REVISION', type=str,
 parser.add_argument('--no-prune', action='store_true')
 parser.add_argument('--data-dir', type=str, default="/tmp/gremnix")
 parser.add_argument('--repository-dir', type=str, required=True, help="The directory containing the repository to consider")
+parser.add_argument('--repository-name', type=str, required=True, help="The remote URL of the repository to consider")
 parser.add_argument('--hydra-eval-jobs', type=str, required=True, help="The hydra-eval-job scrip to use")
 args = parser.parse_args()
 
@@ -192,8 +193,13 @@ if (!mgmt.getGraphIndex("byHashUnique")) {
   commitId = mgmt.makePropertyKey('commitId').dataType(String.class).cardinality(SINGLE).make(); 
   mgmt.buildIndex('byCommitId', Vertex.class).addKey(commitId).buildCompositeIndex()
 
+  repositoryName = mgmt.makePropertyKey('repositoryName').dataType(String.class).cardinality(SINGLE).make(); 
+  mgmt.buildIndex('byrepositoryName', Vertex.class).addKey(repositoryName).buildCompositeIndex()
+
   attrName = mgmt.makePropertyKey('attrName').dataType(String.class).cardinality(SINGLE).make(); 
   mgmt.buildIndex('byAttrName', Vertex.class).addKey(attrName).buildCompositeIndex()
+
+  mgmt.buildIndex('byCommitIdAndAttrName', Vertex.class).addKey(commitId).addKey(attrName).buildCompositeIndex()
 
   mgmt.makeVertexLabel('derivation').make()
   mgmt.makeVertexLabel('job').make()
@@ -303,27 +309,34 @@ def load_graph_into_janus(graph, nodes):
         addE(client, acc, start, i, total_edges_added)
     print("\n%d edges loaded in %fs" % (total_edges_added, time.time() - start))
 
-def load_evaluation(revision):
-    print("Connecting to Gremlin")
+def load_evaluation(repository_name, revision):
+    start = time.time()
+    print("Starting to load jobs")
+    print("  Connecting to Gremlin")
     gremlin = traversal().withRemote(DriverRemoteConnection('ws://localhost:8182/gremlin','g'))
+    client = Client("ws://localhost:8182/gremlin", 'g')
 
     with open(data_dir + "/" + revision + ".json", "r") as read_file:
         data = json.load(read_file)
     
-    l = [{"attrName": k, "hash": os.path.basename(v["drvPath"]).split("-")[0]} for k, v in data.items()]
+    # We need to filter on drvPath because broken jobs doesn't have this attribute:
+    # { 'AgdaSheaves.aarch64-linux': {'error': 'Failed to evaluate Agda-Sheaves-8a06162a8f0f7df308458db91d720cf8f7345d69: «broken»: is marked as broken'}}
+    l = [{"attrName": k, "hash": os.path.basename(v["drvPath"]).split("-")[0]} for k, v in data.items() if 'drvPath' in v]
     n = len(l)
     step = 100
     for i in range(0, n, step):
-        print("Load batch of jobs %d-%d/%d\r" % (i, i + step, n), end="")
-        gremlin.inject(l[i:i+step]).unfold().as_("m").\
-            coalesce(__.V().has("commitId", revision).has("attrName", select("m").select("attrName")), __.addV("job").property("commitId", revision).property("attrName", select("m").select("attrName"))).as_('j').\
-            V().has("hash", l[i]["hash"]).\
-            coalesce(__.inE("instantiation"), __.addE("instantiation").from_("j")).\
-            iterate()
-    print()
+        print("  Load batch of jobs %d-%d/%d in %fs\r" % (i, i + step, n, time.time() - start), end="")
+        client.submit("data.each { " +
+                      "g.inject(1).coalesce(V().has('commitId', revision).has('attrName', it.attrName), __.addV('job').property('commitId', revision).property('repositoryName', rname).property('attrName', it.attrName)).as('j')." +
+                      "V().has('hash', it.hash)." +
+                      "coalesce(__.inE('instantiation').inV().has('commitId', revision).has('attrName', it.attrName), __.addE('instantiation').from('j'))." +
+                      "iterate()}", {"data": l[i:i+step], "revision": revision, "rname": repository_name}).all().result()
+    print("%d jobs loaded in %fs" % (n, time.time() - start)
+)
 
 def run():
     revision = args.revision
+
     eval_nixpkgs(revision)
     start = time.time()
     g = graphml_from_hydra_jobs(revision)
@@ -343,6 +356,7 @@ def run():
         print("%ds to get new nodes" % int(time.time() - start))
     
     load_graph_into_janus(g, nodes)
-    load_evaluation(revision)
+    load_evaluation(args.repository_name, revision)
+
 
 run()
